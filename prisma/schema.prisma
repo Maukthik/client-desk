@@ -1,0 +1,274 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  MEMBER
+  CLIENT
+}
+
+enum ProjectStatus {
+  PLANNING
+  IN_PROGRESS
+  IN_REVIEW
+  ON_HOLD
+  COMPLETED
+}
+
+enum DeliverableStatus {
+  PENDING_REVIEW
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions     Session[]
+  memberships  Membership[]
+  invitations  Invitation[]  @relation("InvitedBy")
+  projects     Project[]     @relation("ProjectCreatedBy")
+  deliverables Deliverable[] @relation("DeliverableCreatedBy")
+  reviews      Deliverable[] @relation("DeliverableReviewedBy")
+  files        File[]
+  invoices     Invoice[]     @relation("InvoiceCreatedBy")
+  activities   Activity[]
+}
+
+model Session {
+  // SHA-256 of the cookie token; the raw token never touches the database.
+  id             String   @id
+  userId         String
+  activeAgencyId String?
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Agency {
+  id                     String   @id @default(cuid())
+  name                   String
+  currency               String   @default("usd")
+  invoicePrefix          String   @default("INV")
+  nextInvoiceNumber      Int      @default(1001)
+  stripeAccountId        String?  @unique
+  stripeChargesEnabled   Boolean  @default(false)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  memberships Membership[]
+  clients     Client[]
+  invitations Invitation[]
+  projects    Project[]
+  invoices    Invoice[]
+  activities  Activity[]
+}
+
+model Membership {
+  id        String   @id @default(cuid())
+  userId    String
+  agencyId  String
+  role      Role
+  // Set only for CLIENT memberships: which client company this person belongs to.
+  clientId  String?
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agency Agency  @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  client Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agencyId])
+  @@index([agencyId])
+  @@index([clientId])
+}
+
+model Client {
+  id        String   @id @default(cuid())
+  agencyId  String
+  name      String
+  email     String?
+  phone     String?
+  website   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  agency      Agency       @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  memberships Membership[]
+  invitations Invitation[]
+  projects    Project[]
+  invoices    Invoice[]
+  activities  Activity[]
+
+  @@index([agencyId])
+}
+
+model Invitation {
+  id          String    @id @default(cuid())
+  agencyId    String
+  email       String
+  role        Role
+  clientId    String?
+  tokenHash   String    @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  agency    Agency  @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  client    Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  invitedBy User    @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@index([email])
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  agencyId    String
+  clientId    String
+  name        String
+  description String?
+  status      ProjectStatus @default(PLANNING)
+  startDate   DateTime?
+  dueDate     DateTime?
+  createdById String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  agency       Agency        @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  client       Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  createdBy    User          @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  deliverables Deliverable[]
+  invoices     Invoice[]
+  activities   Activity[]
+
+  @@index([agencyId, status])
+  @@index([clientId])
+}
+
+model Deliverable {
+  id           String            @id @default(cuid())
+  projectId    String
+  title        String
+  description  String?
+  status       DeliverableStatus @default(PENDING_REVIEW)
+  reviewNote   String?
+  reviewedById String?
+  reviewedAt   DateTime?
+  createdById  String
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  project    Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy  User    @relation("DeliverableCreatedBy", fields: [createdById], references: [id])
+  reviewedBy User?   @relation("DeliverableReviewedBy", fields: [reviewedById], references: [id])
+  files      File[]
+
+  @@index([projectId])
+}
+
+model File {
+  id            String   @id @default(cuid())
+  deliverableId String
+  name          String
+  size          Int
+  mimeType      String
+  storageKey    String   @unique
+  uploadedById  String
+  createdAt     DateTime @default(now())
+
+  deliverable Deliverable @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
+  uploadedBy  User        @relation(fields: [uploadedById], references: [id])
+
+  @@index([deliverableId])
+}
+
+model Invoice {
+  id                      String        @id @default(cuid())
+  agencyId                String
+  clientId                String
+  projectId               String?
+  number                  String
+  status                  InvoiceStatus @default(DRAFT)
+  currency                String
+  issueDate               DateTime      @default(now())
+  dueDate                 DateTime
+  notes                   String?
+  // All money is stored in the currency's minor unit (e.g. cents).
+  subtotal                Int
+  taxRate                 Int           @default(0) // basis points: 825 = 8.25%
+  tax                     Int           @default(0)
+  total                   Int
+  sentAt                  DateTime?
+  paidAt                  DateTime?
+  paymentMethod           String?
+  stripeCheckoutSessionId String?       @unique
+  stripePaymentIntentId   String?
+  createdById             String
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+
+  agency    Agency        @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  client    Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  project   Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  createdBy User          @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  items     InvoiceItem[]
+
+  @@unique([agencyId, number])
+  @@index([agencyId, status])
+  @@index([clientId])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  description String
+  quantity    Decimal @db.Decimal(10, 2)
+  unitAmount  Int
+  amount      Int
+  position    Int
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  agencyId  String
+  clientId  String?
+  projectId String?
+  actorId   String?
+  message   String
+  href      String?
+  createdAt DateTime @default(now())
+
+  agency  Agency   @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  client  Client?  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  actor   User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([agencyId, createdAt])
+  @@index([clientId, createdAt])
+}
